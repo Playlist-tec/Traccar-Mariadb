@@ -1,3 +1,5 @@
+opcional https://github.com/Playlist-tec/Traccar-Mariadb.git
+
 Primeiro comando chmod +x install_traccar.sh
 
 Segundo Comando sudo ./install_traccar.sh
