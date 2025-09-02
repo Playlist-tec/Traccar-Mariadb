@@ -1,127 +1,145 @@
 #!/bin/bash
 
-# Script de instalação automática do Traccar com MariaDB
-# Versão do Traccar: 6.6 (verificar atualizações em https://www.traccar.org/download/)
-
-# Verificar se é root
+# Verifica se é root
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Este script deve ser executado como root ou com sudo." >&2
+    echo -e "\033[31mEste script deve ser executado como root. Use sudo.\033[0m" >&2
     exit 1
 fi
 
-# 1. Atualizar o sistema
-echo "Atualizando o sistema..."
-apt update && apt upgrade -y
+# Configurações
+TRACCAR_VERSION="6.6"
+TRACCAR_URL="https://github.com/traccar/traccar/releases/download/v${TRACCAR_VERSION}/traccar-linux-64-${TRACCAR_VERSION}.zip"
+JDBC_URL="https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.3.0/mysql-connector-j-8.3.0.jar"
+DB_NAME="traccar"
+DB_USER="traccar"
+DB_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9!@#$%^&*()_+-=' | head -c 16)
+MARIADB_ROOT_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9!@#$%^&*()_+-=' | head -c 16)
 
-# 2. Instalar o MariaDB
-echo "Instalando o MariaDB..."
-apt install mariadb-server mariadb-client -y
+# Cores para o output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# Iniciar e habilitar o serviço
+# Função para verificar erros
+check_error() {
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}[ERRO] Ocorreu um erro na etapa: $1${NC}" >&2
+        echo -e "${YELLOW}Verifique os logs e tente corrigir o problema antes de continuar.${NC}"
+        exit 1
+    fi
+}
+
+# Cabeçalho
+echo -e "\n${GREEN}==============================================${NC}"
+echo -e "${GREEN} Script de Instalação Automática do Traccar ${NC}"
+echo -e "${GREEN}==============================================${NC}\n"
+
+# 1. Atualizar sistema
+echo -e "${YELLOW}[1/9] Atualizando o sistema...${NC}"
+apt-get update && apt-get upgrade -y
+check_error "Atualização do sistema"
+apt-get install -y wget unzip
+check_error "Instalação de dependências básicas"
+
+# 2. Instalar e configurar MariaDB
+echo -e "${YELLOW}[2/9] Instalando e configurando MariaDB...${NC}"
+apt-get install -y mariadb-server mariadb-client
+check_error "Instalação do MariaDB"
+
 systemctl start mariadb
 systemctl enable mariadb
 
-# Configurar segurança inicial automaticamente
-echo "Configurando segurança do MariaDB..."
-SECURE_MYSQL=$(expect -c "
-set timeout 10
-spawn mysql_secure_installation
-expect \"Enter current password for root (enter for none):\"
-send \"\r\"
-expect \"Switch to unix_socket authentication\"
-send \"n\r\"
-expect \"Change the root password?\"
-send \"y\r\"
-expect \"New password:\"
-send \"\r\"
-expect \"Re-enter new password:\"
-send \"\r\"
-expect \"Remove anonymous users?\"
-send \"y\r\"
-expect \"Disallow root login remotely?\"
-send \"y\r\"
-expect \"Remove test database and access to it?\"
-send \"y\r\"
-expect \"Reload privilege tables now?\"
-send \"y\r\"
-expect eof
-")
-
-echo "$SECURE_MYSQL"
+# Configuração segura do MariaDB
+echo -e "${YELLOW}Configurando segurança do MariaDB...${NC}"
+mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MARIADB_ROOT_PASS}';"
+mysql -uroot -p"${MARIADB_ROOT_PASS}" -e "DELETE FROM mysql.user WHERE User='';"
+mysql -uroot -p"${MARIADB_ROOT_PASS}" -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
+mysql -uroot -p"${MARIADB_ROOT_PASS}" -e "DROP DATABASE IF EXISTS test;"
+mysql -uroot -p"${MARIADB_ROOT_PASS}" -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
+mysql -uroot -p"${MARIADB_ROOT_PASS}" -e "FLUSH PRIVILEGES;"
 
 # 3. Criar banco de dados e usuário para o Traccar
-echo "Criando banco de dados e usuário para o Traccar..."
-
-# Gerar senha aleatória para o usuário traccar
-DB_PASSWORD=$(openssl rand -base64 12)
-
-mysql -u root <<EOF
-CREATE DATABASE traccar CHARACTER SET utf8 COLLATE utf8_general_ci;
-CREATE USER 'traccar'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
-GRANT ALL PRIVILEGES ON traccar.* TO 'traccar'@'localhost';
+echo -e "${YELLOW}[3/9] Criando banco de dados e usuário para o Traccar...${NC}"
+mysql -uroot -p"${MARIADB_ROOT_PASS}" <<EOF
+CREATE DATABASE IF NOT EXISTS ${DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 EOF
+check_error "Criação do banco de dados"
 
 # 4. Baixar e instalar o Traccar
-echo "Baixando e instalando o Traccar..."
-TRACCAR_VERSION="6.6"
-wget https://github.com/traccar/traccar/releases/download/v$TRACCAR_VERSION/traccar-linux-64-$TRACCAR_VERSION.zip -O traccar.zip
+echo -e "${YELLOW}[4/9] Baixando e instalando o Traccar versão ${TRACCAR_VERSION}...${NC}"
+wget -q --show-progress "${TRACCAR_URL}" -O /tmp/traccar.zip
+check_error "Download do Traccar"
 
-apt install unzip -y
-unzip traccar.zip
-chmod +x traccar.run
-./traccar.run
+unzip -q /tmp/traccar.zip -d /tmp/
+check_error "Descompactação do Traccar"
 
-# 5. Configurar o Traccar para usar o MariaDB
-echo "Configurando o Traccar para usar o MariaDB..."
+chmod +x /tmp/traccar.run
+/tmp/traccar.run
+check_error "Instalação do Traccar"
 
-# Criar backup do arquivo de configuração original
-cp /opt/traccar/conf/traccar.xml /opt/traccar/conf/traccar.xml.bak
-
-# Configurar arquivo traccar.xml
+# 5. Configurar o Traccar para usar MariaDB
+echo -e "${YELLOW}[5/9] Configurando o Traccar...${NC}"
 cat > /opt/traccar/conf/traccar.xml <<EOF
 <?xml version='1.0' encoding='UTF-8'?>
 <!DOCTYPE properties SYSTEM 'http://java.sun.com/dtd/properties.dtd'>
 <properties>
-    <entry key='config.default'>./conf/default.xml</entry>
-    <entry key='web.port'>8082</entry>
-    <entry key='web.path'>./web</entry>
-    <entry key='web.type'>auto</entry>
-    <entry key='web.application'>./traccar-web.war</entry>
     <entry key='database.driver'>com.mysql.cj.jdbc.Driver</entry>
-    <entry key='database.url'>jdbc:mysql://localhost:3306/traccar?serverTimezone=UTC</entry>
-    <entry key='database.user'>traccar</entry>
-    <entry key='database.password'>$DB_PASSWORD</entry>
-    <entry key='geocoder.enable'>false</entry>
-    <entry key='logger.enable'>true</entry>
-    <entry key='logger.level'>all</entry>
-    <entry key='logger.file'>./logs/tracker-server.log</entry>
+    <entry key='database.url'>jdbc:mysql://localhost:3306/${DB_NAME}?useSSL=false&amp;allowPublicKeyRetrieval=true&amp;serverTimezone=UTC</entry>
+    <entry key='database.user'>${DB_USER}</entry>
+    <entry key='database.password'>${DB_PASS}</entry>
 </properties>
 EOF
+check_error "Configuração do arquivo traccar.xml"
 
-# 6. Baixar o driver JDBC do MySQL/MariaDB
-echo "Baixando o driver JDBC..."
-wget https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.3.0/mysql-connector-j-8.3.0.jar -O mysql-connector-j.jar
-mv mysql-connector-j.jar /opt/traccar/lib/
+# 6. Baixar e instalar o driver JDBC
+echo -e "${YELLOW}[6/9] Instalando driver JDBC...${NC}"
+wget -q --show-progress "${JDBC_URL}" -O /tmp/mysql-connector-j.jar
+check_error "Download do driver JDBC"
 
-# 7. Reiniciar o Traccar
-echo "Reiniciando o serviço Traccar..."
+mv /tmp/mysql-connector-j.jar /opt/traccar/lib/
+check_error "Instalação do driver JDBC"
+
+# 7. Configurar firewall (opcional)
+echo -e "${YELLOW}[7/9] Configurando firewall...${NC}"
+if command -v ufw &> /dev/null; then
+    ufw allow 8082/tcp
+    ufw allow 5055/tcp
+    echo -e "${GREEN}Portas 8082 (HTTP) e 5055 (TCP) liberadas no firewall.${NC}"
+fi
+
+# 8. Reiniciar serviços
+echo -e "${YELLOW}[8/9] Reiniciando serviços...${NC}"
+systemctl restart mariadb
 systemctl restart traccar
+check_error "Reinicialização dos serviços"
 
-# Mostrar informações de instalação
+# 9. Verificar status
+echo -e "${YELLOW}[9/9] Verificando status da instalação...${NC}"
+systemctl status traccar --no-pager
+
+# Informações finais
 IP_ADDRESS=$(hostname -I | awk '{print $1}')
-echo ""
-echo "============================================"
-echo "Instalação do Traccar concluída com sucesso!"
-echo "============================================"
-echo ""
-echo "Acesse o sistema em: http://$IP_ADDRESS:8082"
-echo ""
-echo "Credenciais do banco de dados:"
-echo "Usuário: traccar"
-echo "Senha: $DB_PASSWORD"
-echo ""
-echo "Esta senha foi gerada automaticamente. Salve-a em um local seguro."
-echo "============================================"
+echo -e "\n${GREEN}==============================================${NC}"
+echo -e "${GREEN} Instalação concluída com sucesso! ${NC}"
+echo -e "${GREEN}==============================================${NC}"
+echo -e "${YELLOW}Credenciais de acesso:${NC}"
+echo -e " URL do Traccar: ${GREEN}http://${IP_ADDRESS}:8082${NC}"
+echo -e " Usuário admin padrão: ${GREEN}admin${NC}"
+echo -e " Senha admin padrão: ${GREEN}admin${NC}"
+echo -e "\n${YELLOW}Credenciais do banco de dados:${NC}"
+echo -e " Usuário root do MariaDB: ${GREEN}root${NC}"
+echo -e " Senha root do MariaDB: ${RED}${MARIADB_ROOT_PASS}${NC}"
+echo -e " Usuário do Traccar: ${GREEN}${DB_USER}${NC}"
+echo -e " Senha do Traccar: ${RED}${DB_PASS}${NC}"
+echo -e " Banco de dados: ${GREEN}${DB_NAME}${NC}"
+echo -e "\n${YELLOW}ATENÇÃO:${NC}"
+echo -e " - Altere a senha do usuário admin após o primeiro login!"
+echo -e " - Guarde estas credenciais em um local seguro!"
+echo -e " - Consulte os logs em caso de problemas: ${GREEN}/opt/traccar/logs/tracker-server.log${NC}"
+echo -e "${GREEN}==============================================${NC}\n"
 
 exit 0
